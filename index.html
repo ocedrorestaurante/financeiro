@@ -186,7 +186,7 @@ var I = {
 };
 
 var sb = null;
-var state = {auth:'checking', tab:'pagamentos', month:'', notas:[], parcelas:[], vencidas:[], loading:false, loadError:'', view:'lista', files:[], form:null, detalhe:null, confirmDelete:false, search:'', saving:false, readingError:''};
+var state = {auth:'checking', tab:'pagamentos', month:'', notas:[], parcelas:[], vencidas:[], aConferir:[], loading:false, loadError:'', view:'lista', files:[], form:null, detalhe:null, confirmDelete:false, search:'', saving:false, readingError:''};
 
 // ---------- Pequenas utilidades ----------
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
@@ -226,6 +226,7 @@ function dividir(total,n){
   return out;
 }
 function formaTexto(forma,n){
+  if(forma==='a_definir') return 'A definir';
   if(forma==='boleto_parcelado') return n+'x no boleto';
   if(forma==='cartao_parcelado') return n+'x no cartão';
   for(var i=0;i<FORMAS.length;i++) if(FORMAS[i][0]===forma) return FORMAS[i][1];
@@ -302,7 +303,7 @@ function formDeLeitura(d,origem){
 function formDeNota(n){
   var f=novoForm();
   f.id=n.id; f.fornecedor=n.fornecedor; f.cnpj=n.cnpj||''; f.numero=n.numero||''; f.serie=n.serie||''; f.chave=n.chave||'';
-  f.data_emissao=n.data_emissao||''; f.data_entrada=n.data_entrada; f.valor_total=fmtMoneyInput(n.valor_total); f.forma=n.forma_pagamento; f.origem=n.origem; f.arquivos=n.arquivos||[];
+  f.data_emissao=n.data_emissao||''; f.data_entrada=n.data_entrada; f.valor_total=fmtMoneyInput(n.valor_total); f.forma=n.forma_pagamento==='a_definir'?'':n.forma_pagamento; f.origem=n.origem; f.confirmando=n.status==='a_conferir'; if(f.confirmando) f.data_entrada=hoje(); f.arquivos=n.arquivos||[];
   f.itens=(n.fin_itens||[]).slice().sort(function(a,b){return a.ordem-b.ordem;}).map(function(i){ return {produto:i.produto,quantidade:fmtNum(i.quantidade,4),unidade:i.unidade||'',valor_unitario:fmtNum(i.valor_unitario,4),valor_total:fmtMoneyInput(i.valor_total)}; });
   if(!AVISTA[f.forma]) f.parcelas=(n.fin_parcelas||[]).slice().sort(function(a,b){return a.numero-b.numero;}).map(function(p){ return {vencimento:p.vencimento,valor:fmtMoneyInput(p.valor),pago:!!p.pago_em,pago_em:p.pago_em||null}; });
   f.pagoOriginal=null;
@@ -362,12 +363,12 @@ function montarPayload(f,id,arquivos){
     var n=f.parcelas.length;
     parcelas=f.parcelas.map(function(p,i){ return {numero:i+1,total:n,vencimento:p.vencimento,valor:parseNum(p.valor),pago_em:p.pago?(p.pago_em||hoje()):null}; });
   }
-  return {nota:{id:id,fornecedor:f.fornecedor.trim(),cnpj:f.cnpj,numero:f.numero.trim(),serie:f.serie.trim(),chave:f.chave,data_emissao:f.data_emissao,data_entrada:f.data_entrada,valor_total:total,forma_pagamento:f.forma,origem:f.origem,arquivos:arquivos},itens:itens,parcelas:parcelas};
+  return {nota:{id:id,fornecedor:f.fornecedor.trim(),cnpj:f.cnpj,numero:f.numero.trim(),serie:f.serie.trim(),chave:f.chave,data_emissao:f.data_emissao,data_entrada:f.data_entrada,valor_total:total,forma_pagamento:f.forma,origem:f.origem,arquivos:arquivos,status:'conferida'},itens:itens,parcelas:parcelas};
 }
 
 // ---------- Dados ----------
 var SEL_NOTA='*, fin_itens(*), fin_parcelas(*)';
-var SEL_PARC='*, fin_notas(id,fornecedor,numero,forma_pagamento,fin_itens(produto,ordem))';
+var SEL_PARC='*, fin_notas(id,fornecedor,numero,forma_pagamento,status,fin_itens(produto,ordem))';
 function ok(r){ if(r.error) throw r.error; return r.data; }
 var carga=0;
 async function carregar(semTela){
@@ -376,19 +377,20 @@ async function carregar(semTela){
   if(!semTela){ state.loading=true; render(); }
   try{
     var res=await Promise.all([
-      sb.from('fin_notas').select(SEL_NOTA).gte('data_entrada',m.ini).lt('data_entrada',m.fim).order('data_entrada',{ascending:false}).order('criado_em',{ascending:false}),
+      sb.from('fin_notas').select(SEL_NOTA).eq('status','conferida').gte('data_entrada',m.ini).lt('data_entrada',m.fim).order('data_entrada',{ascending:false}).order('criado_em',{ascending:false}),
       sb.from('fin_parcelas').select(SEL_PARC).gte('vencimento',m.ini).lt('vencimento',m.fim).order('vencimento',{ascending:true}).order('numero',{ascending:true}),
-      sb.from('fin_parcelas').select(SEL_PARC).is('pago_em',null).lt('vencimento',hoje()).order('vencimento',{ascending:true}).limit(300)
+      sb.from('fin_parcelas').select(SEL_PARC).is('pago_em',null).lt('vencimento',hoje()).order('vencimento',{ascending:true}).limit(300),
+      sb.from('fin_notas').select(SEL_NOTA).eq('status','a_conferir').order('criado_em',{ascending:false}).limit(200)
     ]);
     if(meu!==carga) return;
-    state.notas=ok(res[0]); state.parcelas=ok(res[1]); state.vencidas=ok(res[2]);
+    state.notas=ok(res[0]); state.parcelas=ok(res[1]); state.vencidas=ok(res[2]); state.aConferir=ok(res[3]);
   }catch(e){
     console.error(e);
     if(meu!==carga) return;
     state.loadError='Não foi possível carregar. Confira a internet e tente de novo.';
   }
   state.loading=false;
-  if(state.view==='lista') render();
+  if(state.view==='lista'||state.view==='conferir') render();
 }
 async function abrirNota(id){
   try{
@@ -458,7 +460,7 @@ async function salvar(){
     limparArquivos();
     state.saving=false; state.form=null; state.view='lista';
     state.month=f.data_entrada.slice(0,7); state.tab=novo?'entradas':state.tab;
-    toast(novo?'Nota salva.':'Alterações salvas.');
+    toast(f.confirmando?'Entrada confirmada.':novo?'Nota salva.':'Alterações salvas.');
     await carregar(); render(); window.scrollTo(0,0);
   }catch(e){
     console.error(e);
@@ -573,6 +575,7 @@ function render(){
   else if(state.auth==='denied') html='<div class="center"><div>Este login não tem acesso ao financeiro.</div><button class="btn btn-ghost" data-a="sair">Sair</button></div>';
   else if(state.auth==='no-db') html='<div class="center"><div>O banco do financeiro ainda não foi criado. Rode o arquivo 1-banco-financeiro.sql no Supabase e atualize a página.</div><button class="btn btn-ghost" data-a="sair">Sair</button></div>';
   else if(state.view==='lista') html=telaLista();
+  else if(state.view==='conferir') html=telaConferir();
   else if(state.view==='nova') html=telaNova();
   else if(state.view==='lendo') html=telaLendo();
   else if(state.view==='form') html=telaForm();
@@ -601,6 +604,10 @@ function telaLista(){
   if(antigas.length){
     var sa=antigas.reduce(function(s,p){return s+Number(p.valor);},0);
     ban='<button class="banner banner-danger" data-a="ir-mes" data-m="'+esc(antigas[0].vencimento.slice(0,7))+'"><b>'+antigas.length+(antigas.length===1?' parcela vencida':' parcelas vencidas')+' de meses anteriores: '+money(sa)+'.</b> Toque para ver a mais antiga.</button>';
+  }
+  if(state.aConferir.length){
+    var sc=state.aConferir.reduce(function(s,n){return s+Number(n.valor_total);},0);
+    ban='<button class="banner banner-warning" data-a="ver-conferir"><b>'+state.aConferir.length+(state.aConferir.length===1?' nota chegou':' notas chegaram')+' por e-mail: '+money(sc)+'.</b> Toque para conferir.</button>'+ban;
   }
   var corpo;
   if(state.loading) corpo='<div class="empty">Carregando...</div>';
@@ -649,6 +656,15 @@ function listaEntradas(){
   });
   return out;
 }
+function telaConferir(){
+  var h=barraTopo('A conferir','voltar')+'<main class="wrap"><p class="hint" style="margin:12px 0">Estas notas vieram por e-mail. Confirme quando a mercadoria chegar. As parcelas já aparecem em Pagamentos.</p>';
+  if(!state.aConferir.length) h+='<div class="empty"><b>Nada para conferir</b>As notas do e-mail aparecem aqui depois da leitura do fim do dia.</div>';
+  state.aConferir.forEach(function(n){
+    var np=(n.fin_parcelas||[]).length;
+    h+='<div class="card"><button class="row row-main" data-a="abrir" data-id="'+esc(n.id)+'"><div style="flex:1;min-width:0"><div class="row-title">'+esc(n.fornecedor)+'</div><div class="row-sub">'+esc(produtosResumo(n.fin_itens))+'</div><div class="row-sub">Chegou por e-mail em '+dataBR(n.data_entrada)+'</div></div><div class="row-end"><div class="row-val">'+money(n.valor_total)+'</div><div class="row-tag">'+esc(formaTexto(n.forma_pagamento,np))+'</div></div></button></div>';
+  });
+  return h+'</main>';
+}
 function barraTopo(titulo,acao){
   return '<header class="head"><div class="head-in top-bar"><button class="icon-btn" data-a="'+acao+'" aria-label="Voltar">'+I.left+'</button><h2>'+esc(titulo)+'</h2></div></header>';
 }
@@ -673,7 +689,7 @@ function campo(id,label,valor,extra){
   return '<div class="field"><label for="'+id+'">'+label+'</label><input id="'+id+'" value="'+esc(valor)+'" '+(extra||'')+'></div>';
 }
 function telaForm(){
-  var f=state.form, h=barraTopo(f.id?'Editar nota':'Conferir nota','cancelar')+'<main class="wrap">';
+  var f=state.form, h=barraTopo(f.confirmando?'Confirmar entrada':f.id?'Editar nota':'Conferir nota','cancelar')+'<main class="wrap">';
   h+='<div id="form-erros"></div><div id="form-dup"></div>';
   if(f.avisos.length) h+='<div class="banner banner-warning" style="margin-top:14px"><b>Confira com atenção:</b><ul>'+f.avisos.map(function(a){return '<li>'+esc(a)+'</li>';}).join('')+'</ul></div>';
   h+='<div class="sec"><div class="sec-title">Nota</div>'+
@@ -720,11 +736,12 @@ function renderAvisosConta(){
 }
 function atualizaBotaoSalvar(){
   var b=document.getElementById('btn-salvar'); if(!b) return;
-  b.disabled=state.saving; b.textContent=state.saving?'Salvando...':(state.form&&state.form.id?'Salvar alterações':'Salvar nota');
+  b.disabled=state.saving; b.textContent=state.saving?'Salvando...':(state.form&&state.form.confirmando?'Confirmar entrada':state.form&&state.form.id?'Salvar alterações':'Salvar nota');
 }
 function telaDetalhe(){
   var n=state.detalhe, itens=(n.fin_itens||[]).slice().sort(function(a,b){return a.ordem-b.ordem;}), parc=(n.fin_parcelas||[]).slice().sort(function(a,b){return a.numero-b.numero;}), h=hoje();
   var html=barraTopo(n.fornecedor,'voltar')+'<main class="wrap">';
+  if(n.status==='a_conferir') html+='<div class="banner banner-warning" style="margin-top:14px"><b>A conferir.</b> Esta nota veio por e-mail. Confirme quando a mercadoria chegar.</div>';
   html+='<p class="hint" style="margin-top:12px">Entrada em '+dataBR(n.data_entrada)+(n.numero?' · Nota '+esc(n.numero):'')+(n.data_emissao?' · Emitida em '+dataBR(n.data_emissao):'')+'</p>';
   html+='<div class="sec"><div class="sec-title">Produtos</div><div class="card">';
   if(itens.length){
@@ -741,7 +758,7 @@ function telaDetalhe(){
   if(n.arquivos&&n.arquivos.length){
     html+='<div class="sec"><div class="sec-title">Arquivos</div><div class="chips">'+n.arquivos.map(function(c,i){ return '<button class="chip" data-a="ver-arquivo" data-c="'+esc(c)+'">'+(/\.xml$/.test(c)?'XML':/\.pdf$/.test(c)?'PDF':'Foto')+(n.arquivos.length>1?' '+(i+1):'')+'</button>'; }).join('')+'</div></div>';
   }
-  html+='<div class="sec"><button class="btn btn-ghost btn-block" data-a="editar">'+I.pen+'Editar nota</button>';
+  html+='<div class="sec"><button class="btn btn-ghost btn-block" data-a="editar">'+I.pen+(n.status==='a_conferir'?'Conferir e confirmar entrada':'Editar nota')+'</button>';
   html+=state.confirmDelete?'<div class="confirm"><span class="grow">Excluir esta nota e todas as parcelas?</span><button class="btn btn-ghost" data-a="del-nao">Não</button><button class="btn btn-danger" data-a="del-sim">Excluir</button></div>':'<button class="btn btn-danger btn-block" style="margin-top:8px" data-a="del">Excluir nota</button>';
   html+='</div></main>';
   return html;
@@ -755,10 +772,11 @@ document.addEventListener('click',function(ev){
   if(a==='mes'){ state.month=addMeses(state.month+'-01',Number(el.getAttribute('data-d'))).slice(0,7); carregar(); return; }
   if(a==='ir-mes'){ state.month=el.getAttribute('data-m'); state.tab='pagamentos'; carregar(); return; }
   if(a==='recarregar'){ carregar(); return; }
+  if(a==='ver-conferir'){ state.view='conferir'; render(); window.scrollTo(0,0); return; }
   if(a==='tab'){ state.tab=el.getAttribute('data-t'); render(); return; }
   if(a==='nova'){ limparArquivos(); state.readingError=''; state.view='nova'; render(); window.scrollTo(0,0); return; }
   if(a==='cancelar'){ sairDoFluxo(); return; }
-  if(a==='voltar'){ state.detalhe=null; state.view='lista'; render(); carregar(true); return; }
+  if(a==='voltar'){ var deConferir=state.view==='detalhe'&&state.detalhe&&state.detalhe.status==='a_conferir'; state.detalhe=null; state.view=(deConferir&&state.aConferir.length)?'conferir':'lista'; render(); carregar(true); return; }
   if(a==='camera'){ document.getElementById('in-camera').click(); return; }
   if(a==='arquivo'){ document.getElementById('in-file').click(); return; }
   if(a==='manual'){ abrirForm(novoForm()); if(state.files.length) state.form.origem=state.files[0].tipo==='application/pdf'?'pdf':'foto'; return; }
@@ -844,7 +862,7 @@ document.addEventListener('submit',async function(ev){
   }
 });
 document.addEventListener('visibilitychange',function(){
-  if(!document.hidden&&state.auth==='ok'&&state.view==='lista') carregar(true);
+  if(!document.hidden&&state.auth==='ok'&&(state.view==='lista'||state.view==='conferir')) carregar(true);
 });
 
 // ---------- Início ----------
@@ -861,7 +879,7 @@ async function entrou(){
   render();
   if(state.auth==='ok') carregar();
 }
-function saiu(){ limparArquivos(); state.auth='signed-out'; state.form=null; state.detalhe=null; state.view='lista'; state.notas=[]; state.parcelas=[]; state.vencidas=[]; render(); }
+function saiu(){ limparArquivos(); state.auth='signed-out'; state.form=null; state.detalhe=null; state.view='lista'; state.notas=[]; state.parcelas=[]; state.vencidas=[]; state.aConferir=[]; render(); }
 function iniciar(){
   state.month=hoje().slice(0,7);
   if(!window.supabase||!window.supabase.createClient){ state.auth='error'; render(); return; }
